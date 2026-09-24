@@ -1,0 +1,10 @@
+{
+  "name": "Clean Speech",
+  "description": "Speak naturally. Get clean, readable text without changing what you meant.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
