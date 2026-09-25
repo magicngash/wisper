@@ -12,3 +12,16 @@ export interface SampleSpeech {
   description: string;
   rawText: string;
 }
+
+declare global {
+  interface Window {
+    cleanSpeechDesktop?: {
+      isDesktop: boolean;
+      onStartRecording: (callback: () => void) => () => void;
+      onStopRecording: (callback: () => void) => () => void;
+      insertText: (text: string) => void;
+      notifyError: (message: string) => void;
+      setOverlayStatus: (status: RecordingState, label: string, detail: string, recordingTime?: number) => void;
+    };
+  }
+}

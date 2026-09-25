@@ -40,7 +40,19 @@ export default function App() {
 
   // Clear timer on unmount
   useEffect(() => {
+    const desktop = window.cleanSpeechDesktop;
+    const removeStartListener = desktop?.onStartRecording(() => {
+      console.log('[desktop] START received');
+      void handleStartRecording();
+    });
+    const removeStopListener = desktop?.onStopRecording(() => {
+      console.log('[desktop] STOP received');
+      void handleStopRecording();
+    });
+
     return () => {
+      removeStartListener?.();
+      removeStopListener?.();
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
       speechRecorder.cancel();
     };
@@ -52,6 +64,43 @@ export default function App() {
     const secs = seconds % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
+
+  const statusDetails = {
+    idle: {
+      label: rawTranscript ? 'Ready for another recording' : 'Ready to record',
+      detail: 'Press Record or hold Ctrl+Shift+Space to begin.',
+      color: 'slate',
+    },
+    recording: {
+      label: 'Recording your voice',
+      detail: 'Speak naturally. Release the shortcut or press Stop when finished.',
+      color: 'rose',
+    },
+    transcribing: {
+      label: 'Transcribing locally with Whisper',
+      detail: 'Your audio is being processed on this computer. This can take a moment on the first run.',
+      color: 'indigo',
+    },
+    refining: {
+      label: 'Cleaning up your transcript',
+      detail: 'Preserving your meaning while removing speech stumbles and filler words.',
+      color: 'indigo',
+    },
+    error: {
+      label: 'Something needs attention',
+      detail: 'Check the notice below and try again.',
+      color: 'rose',
+    },
+  }[recordingState];
+
+  useEffect(() => {
+    window.cleanSpeechDesktop?.setOverlayStatus(
+      recordingState,
+      statusDetails.label,
+      statusDetails.detail,
+      recordingState === 'recording' ? recordingTime : 0,
+    );
+  }, [recordingState, recordingTime, statusDetails.detail, statusDetails.label]);
 
   // Start recording
   const handleStartRecording = async () => {
@@ -121,10 +170,13 @@ export default function App() {
     try {
       const refined = await refineTranscript(textToRefine);
       setRefinedTranscript(refined);
+      window.cleanSpeechDesktop?.insertText(refined);
       setRecordingState('idle');
     } catch (err: any) {
       setRecordingState('idle');
       setErrorMessage(err.message || 'AI refinement failed. You can retry with the button below.');
+      window.cleanSpeechDesktop?.insertText(textToRefine);
+      window.cleanSpeechDesktop?.notifyError(err.message || 'AI refinement failed. Raw transcript inserted.');
     }
   };
 
@@ -236,6 +288,30 @@ export default function App() {
         {/* Recording Control Card */}
         <section className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6 sm:p-8 text-center relative overflow-hidden transition-all">
           <div className="flex flex-col items-center justify-center gap-4">
+            {/* Always-visible activity status, including desktop push-to-talk. */}
+            <div
+              aria-live="polite"
+              className={`w-full max-w-xl rounded-xl border px-4 py-3 text-left flex items-start gap-3 ${
+                statusDetails.color === 'rose'
+                  ? 'bg-rose-50 border-rose-200 text-rose-900'
+                  : statusDetails.color === 'indigo'
+                    ? 'bg-indigo-50 border-indigo-200 text-indigo-900'
+                    : 'bg-slate-50 border-slate-200 text-slate-800'
+              }`}
+            >
+              <span className={`mt-1.5 w-2.5 h-2.5 rounded-full shrink-0 ${
+                recordingState === 'recording'
+                  ? 'bg-rose-600 animate-ping'
+                  : recordingState === 'transcribing' || recordingState === 'refining'
+                    ? 'bg-indigo-600 animate-pulse'
+                    : 'bg-slate-400'
+              }`} />
+              <div className="min-w-0">
+                <p className="text-sm font-bold">{statusDetails.label}</p>
+                <p className="text-xs mt-0.5 opacity-75">{statusDetails.detail}</p>
+              </div>
+            </div>
+
             {/* Live Timer & Indicator when Recording */}
             {recordingState === 'recording' ? (
               <div className="flex flex-col items-center gap-2">
@@ -290,7 +366,7 @@ export default function App() {
               ) : recordingState === 'transcribing' ? (
                 <div className="flex items-center gap-2 text-sm font-medium text-indigo-700 animate-pulse">
                   <div className="w-4 h-4 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
-                  <span>Stage 1: Capturing raw speech-to-text...</span>
+                  <span>Stage 1: Transcribing locally with Whisper...</span>
                 </div>
               ) : recordingState === 'refining' ? (
                 <div className="flex items-center gap-2 text-sm font-medium text-indigo-700 animate-pulse">

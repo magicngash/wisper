@@ -1,4 +1,5 @@
 import express from 'express';
+import { env, pipeline } from '@huggingface/transformers';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -7,8 +8,74 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+// Avoid the browser-style /models path and cache the downloaded model locally.
+env.allowLocalModels = false;
+env.allowRemoteModels = true;
 
 const app = express();
+let whisper: any;
+
+function decodePcmWav(buffer: Buffer): Float32Array {
+  if (buffer.toString('ascii', 0, 4) !== 'RIFF' || buffer.toString('ascii', 8, 12) !== 'WAVE') {
+    throw new Error('Local Whisper requires a PCM WAV recording.');
+  }
+
+  let format: { audioFormat: number; channels: number; bitsPerSample: number } | undefined;
+  let dataStart = -1;
+  let dataLength = 0;
+  let offset = 12;
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString('ascii', offset, offset + 4);
+    const chunkLength = buffer.readUInt32LE(offset + 4);
+    const chunkStart = offset + 8;
+    if (chunkId === 'fmt ') {
+      format = {
+        audioFormat: buffer.readUInt16LE(chunkStart),
+        channels: buffer.readUInt16LE(chunkStart + 2),
+        bitsPerSample: buffer.readUInt16LE(chunkStart + 14),
+      };
+    } else if (chunkId === 'data') {
+      dataStart = chunkStart;
+      dataLength = chunkLength;
+      break;
+    }
+    offset = chunkStart + chunkLength + (chunkLength % 2);
+  }
+
+  if (!format || dataStart < 0 || format.audioFormat !== 1 || format.bitsPerSample !== 16) {
+    throw new Error('Local Whisper only supports 16-bit PCM WAV audio.');
+  }
+
+  const frameCount = Math.floor(dataLength / (format.channels * 2));
+  const samples = new Float32Array(frameCount);
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    let sample = 0;
+    for (let channel = 0; channel < format.channels; channel += 1) {
+      sample += buffer.readInt16LE(dataStart + (frame * format.channels + channel) * 2) / 32768;
+    }
+    samples[frame] = sample / format.channels;
+  }
+  return samples;
+}
+
+async function transcribeLocally(samples: Float32Array): Promise<string> {
+  if (!whisper) {
+    console.log('Loading local Whisper model (first run downloads and caches it)...');
+    whisper = await pipeline(
+      'automatic-speech-recognition',
+      process.env.WHISPER_MODEL || 'onnx-community/whisper-tiny.en',
+      { dtype: 'q8' },
+    );
+    console.log('Local Whisper model ready.');
+  }
+  // whisper-tiny.en is English-only and supplies its own generation config;
+  // passing language/task options makes Transformers.js reject the request.
+  const result = await whisper(samples, { chunk_length_s: 30 });
+  /*
+  const result = await whisper(samples, { language: 'english', task: 'transcribe', chunk_length_s: ನ್ನಡ30 });
+  */
+  return String(result.text || '').trim();
+}
 const port = parseInt(process.env.PORT || '3000', 10);
 
 // Parse JSON bodies with up to 25MB limit for audio blobs
@@ -273,23 +340,24 @@ app.post('/api/refine', async (req, res) => {
   }
 });
 
-// DeepSeek is text-only. Stage 1 is handled by the browser SpeechRecognition API.
+// Local Whisper fallback. Audio is decoded and transcribed on this machine.
 app.post('/api/transcribe', async (req, res) => {
   try {
-    const { audioBase64, mimeType } = req.body;
+    const { audioBase64 } = req.body;
 
     if (!audioBase64) {
       res.status(400).json({ error: 'Audio data is required.' });
       return;
     }
 
-    res.status(501).json({
-      error: 'Audio fallback is unavailable. Please use Chrome or Edge so browser speech recognition can capture the microphone input.',
-    });
+    const audio = Buffer.from(audioBase64, 'base64');
+    const samples = decodePcmWav(audio);
+    const rawTranscript = await transcribeLocally(samples);
+    res.json({ rawTranscript });
   } catch (error: any) {
     console.error('Error during audio transcription:', error);
     res.status(500).json({
-      error: 'Failed to transcribe audio recording. Please try again.',
+      error: error?.message || 'Failed to transcribe audio recording locally. Please try again.',
     });
   }
 });

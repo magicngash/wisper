@@ -1,7 +1,7 @@
 /**
  * Modular Speech-to-Text provider service.
  * Supports native Web Speech API (instant live transcription) with
- * MediaRecorder fallback to Gemini Cloud Transcribe.
+ * MediaRecorder fallback to local Whisper transcription.
  */
 
 import { transcribeAudioBlob } from './aiService.ts';
@@ -56,7 +56,7 @@ export class SpeechRecorderService {
       throw new Error(`Microphone access error: ${err.message || 'Unable to access microphone'}`);
     }
 
-    // 2. Initialize MediaRecorder as backup / fallback
+    // 2. Initialize MediaRecorder as a local Whisper fallback
     try {
       let mimeType = 'audio/webm';
       if (!MediaRecorder.isTypeSupported('audio/webm')) {
@@ -164,8 +164,8 @@ export class SpeechRecorderService {
       return finalText;
     }
 
-    // Fallback: If Web Speech API didn't capture text (e.g. mobile Safari / Firefox / iframe),
-    // transcribe the recorded audio blob with Gemini 3.5 Transcribe
+    // Fallback: if browser speech recognition is unavailable or reports a
+    // network error, transcribe the recording locally with Whisper.
     if (audioBlob && audioBlob.size > 2000) {
       const serverTranscribed = await transcribeAudioBlob(audioBlob);
       if (serverTranscribed && serverTranscribed.trim()) {
