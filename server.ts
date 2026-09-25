@@ -2,7 +2,6 @@ import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
 
@@ -15,19 +14,13 @@ const port = parseInt(process.env.PORT || '3000', 10);
 // Parse JSON bodies with up to 25MB limit for audio blobs
 app.use(express.json({ limit: '25mb' }));
 
-const apiKey = process.env.GEMINI_API_KEY;
-if (!apiKey) {
-  console.warn('WARNING: GEMINI_API_KEY environment variable is not set.');
+const deepSeekApiKey = process.env.DEEPSEEK_API_KEY;
+if (!deepSeekApiKey) {
+  console.warn('WARNING: DEEPSEEK_API_KEY environment variable is not set.');
 }
 
-const ai = new GoogleGenAI({
-  apiKey: apiKey || '',
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    },
-  },
-});
+const deepSeekBaseUrl = (process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com').replace(/\/$/, '');
+const deepSeekModel = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
 
 const REFINEMENT_SYSTEM_INSTRUCTION = `You are an intelligent speech-to-text refinement and formatting engine.
 
@@ -218,7 +211,12 @@ Do not add commentary.`;
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', hasApiKey: !!process.env.GEMINI_API_KEY });
+  res.json({
+    status: 'ok',
+    provider: 'deepseek',
+    model: deepSeekModel,
+    hasDeepSeekKey: !!deepSeekApiKey,
+  });
 });
 
 // Stage 2: AI Refinement endpoint
@@ -231,47 +229,38 @@ app.post('/api/refine', async (req, res) => {
       return;
     }
 
-    if (!process.env.GEMINI_API_KEY) {
-      res.status(500).json({ error: 'Gemini API key is not configured on the server.' });
+    if (!deepSeekApiKey) {
+      res.status(500).json({ error: 'DeepSeek API key is not configured on the server.' });
       return;
     }
 
-    // Models to try in order of preference to safeguard against transient 503/429 spikes
-    const candidateModels = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash'];
-    let lastError: any = null;
-    let refinedText = '';
+    const response = await fetch(`${deepSeekBaseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${deepSeekApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: deepSeekModel,
+        messages: [
+          { role: 'system', content: REFINEMENT_SYSTEM_INSTRUCTION },
+          { role: 'user', content: `Here is the raw speech-to-text transcript:\n\n${rawTranscript.trim()}` },
+        ],
+        temperature: 0.1,
+        stream: false,
+      }),
+    });
 
-    for (const model of candidateModels) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: `Here is the raw speech-to-text transcript:\n\n${rawTranscript.trim()}` }],
-            },
-          ],
-          config: {
-            systemInstruction: REFINEMENT_SYSTEM_INSTRUCTION,
-            temperature: 0.1,
-          },
-        });
-
-        refinedText = response.text?.trim() || '';
-        if (refinedText) {
-          break; // successfully generated
-        }
-      } catch (err: any) {
-        lastError = err;
-        console.warn(`Model ${model} failed with ${err.status || err.message?.slice(0, 50)}, trying next candidate...`);
-      }
+    const data = await response.json() as any;
+    if (!response.ok) {
+      console.error('DeepSeek refinement error:', data);
+      res.status(response.status).json({ error: data.error?.message || 'DeepSeek refinement failed.' });
+      return;
     }
 
+    const refinedText = data.choices?.[0]?.message?.content?.trim();
     if (!refinedText) {
-      const userMessage = lastError?.message?.includes('high demand') || lastError?.status === 503
-        ? 'The AI service is experiencing a temporary spike in demand. Please try again in a few seconds.'
-        : 'Refinement could not be completed. Please try again.';
-      res.status(500).json({ error: userMessage });
+      res.status(502).json({ error: 'DeepSeek returned an empty refinement.' });
       return;
     }
 
@@ -284,7 +273,7 @@ app.post('/api/refine', async (req, res) => {
   }
 });
 
-// Fallback Stage 1: Audio Transcription endpoint
+// DeepSeek is text-only. Stage 1 is handled by the browser SpeechRecognition API.
 app.post('/api/transcribe', async (req, res) => {
   try {
     const { audioBase64, mimeType } = req.body;
@@ -294,55 +283,9 @@ app.post('/api/transcribe', async (req, res) => {
       return;
     }
 
-    if (!process.env.GEMINI_API_KEY) {
-      res.status(500).json({ error: 'Gemini API key is not configured on the server.' });
-      return;
-    }
-
-    const cleanMime = mimeType?.split(';')[0] || 'audio/webm';
-    const candidateModels = ['gemini-3.5-transcribe', 'gemini-3.6-flash', 'gemini-3.8-flash'];
-    let rawTranscript = '';
-    let lastError: any = null;
-
-    for (const model of candidateModels) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: {
-            parts: [
-              {
-                inlineData: {
-                  mimeType: cleanMime,
-                  data: audioBase64,
-                },
-              },
-              {
-                text: 'Transcribe this audio recording verbatim. Write down every spoken word, including filler words (such as um, uh, ah, er, you know, like), stumbles, false starts, and repetitions exactly as spoken. Do NOT clean, edit, filter, or summarize.',
-              },
-            ],
-          },
-        });
-
-        rawTranscript = response.text?.trim() || '';
-        if (rawTranscript) {
-          break;
-        }
-      } catch (err: any) {
-        lastError = err;
-        console.warn(`Transcribe model ${model} error:`, err.status || err.message?.slice(0, 50));
-      }
-    }
-
-    if (!rawTranscript) {
-      res.status(400).json({
-        error: lastError?.message?.includes('high demand')
-          ? 'Audio transcription service is momentarily busy. Please try again shortly.'
-          : 'No audible speech detected in the recording.',
-      });
-      return;
-    }
-
-    res.json({ rawTranscript });
+    res.status(501).json({
+      error: 'Audio fallback is unavailable. Please use Chrome or Edge so browser speech recognition can capture the microphone input.',
+    });
   } catch (error: any) {
     console.error('Error during audio transcription:', error);
     res.status(500).json({
